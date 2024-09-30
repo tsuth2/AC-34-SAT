@@ -1,4 +1,4 @@
-#! python3.7
+#! python3.11
 
 import argparse
 import os
@@ -6,7 +6,6 @@ import numpy as np
 import speech_recognition as sr
 import whisper
 import torch
-import GUI
 
 from datetime import datetime, timedelta
 from queue import Queue
