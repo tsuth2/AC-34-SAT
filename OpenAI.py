@@ -1,21 +1,18 @@
+# Default quickstart code for API usage found on openai's website.
 from openai import OpenAI
-import os
+client = OpenAI()
 
-def api_response(transcription):
-  client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-
-  completion = client.chat.completions.create(
-    model="gpt-3.5-turbo",
+completion = client.chat.completions.create(
+    model="gpt-4o",
     messages=[
-      {"role": "system", "content": "You are speaking to somebody on the phone that is discussing computer issues, and are purposely being unhelpful to them because they are a scammer."},
-      {"role": "user", "content": [{"type": "text", "text": f"{transcription}"}]} #"Compose a poem that explains the concept of recursion in programming."}
+        {"role": "system", "content": "You are a helpful assistant."},
+        {
+            "role": "user",
+            "content": "Write a haiku about recursion in programming."
+        }
     ]
-  )
-
-  return completion
-
+)
 
 if __name__ == "__main__":
-    transcription = "Sigma!"
-    completion = api_response(transcription)
     print(completion.choices[0].message)
+    

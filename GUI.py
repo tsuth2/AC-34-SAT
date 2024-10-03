@@ -1,19 +1,22 @@
-#GUI imports
+# GUI imports
 from tkinter import *
 import threading
 import queue  # Import queue for thread-safe communication
 
-#TRANSCRIPTION imports
+# TRANSCRIPTION imports
 import argparse
 import os
 import numpy as np
 import speech_recognition as sr
 import whisper
 import torch
-
 from datetime import datetime, timedelta
 from time import sleep
 from sys import platform
+
+# API imports
+from openai import OpenAI
+import os
 
 class App(Tk):
     def __init__(self, title):
@@ -33,20 +36,33 @@ class App(Tk):
 
         # Queue for communication between the transcription thread and the main thread
         self.transcription_queue = queue.Queue()
+        # Queue for communication between the API response thread and the main thread
+        self.output_queue = queue.Queue()
 
-        # Transcription thread variable
-        self.transcripting_thread = None
-        self.transcription_running = False # Flag to control transcription
+        # Transcription thread variables
+        self.transcribing_thread = None
+        self.transcription_running = False  # Flag to control transcription
 
-        # Polling queue for transcription updates
+        # Output response thread variables
+        self.output_thread = None
+        self.output_running = False  # Flag to control outputted response
+
+        # Polling queue for both transcription and response updates
         self.input_poll_transcription_queue()
+        self.output_poll_response_queue()
 
-        #Calling the function for updating input text
-        self.upd_inp_text = Text_Display(self)
-        self.update_input_text = self.upd_inp_text.update_input_text
+        self.upd_text = Text_Display(self)
+        # Calling the function for updating input text
+        self.update_input_text = self.upd_text.update_input_text
+
+        # Calling the function for updating output text
+        self.update_output_text = self.upd_text.update_output_text
+
+        # Accumulated transcription for resetting every 30 seconds
+        self.transcription_accumulated = None
 
         self.mainloop()
-        
+
     def input_poll_transcription_queue(self):
         """
         Poll the transcription queue to check for updates from the transcription thread.
@@ -54,98 +70,156 @@ class App(Tk):
         """        
         try:
             transcription = self.transcription_queue.get_nowait()
-            if transcription:
-                print(f"Received transcription: {transcription}")
-            # Call the update method to update the Text widget
-            self.update_input_text(transcription)
-        except queue.Empty:  # Use queue.Empty instead of Queue.Empty
+            if transcription.strip():  # Only proceed if transcription contains actual text
+                self.update_input_text(transcription)
+        except queue.Empty: 
             pass  # No transcription data available yet
-
-        
 
         self.after(1500, self.input_poll_transcription_queue)
 
-        
+    def output_poll_response_queue(self):      
+        """
+        Same as the input poll function but checking the output queue
+        for any changes and then applying them if so.
+        """
+        try:
+            response = self.output_queue.get_nowait()
+            if response.strip():  # Only proceed if response contains actual text
+                self.update_output_text(response)
+        except queue.Empty:
+            pass  # No transcription data available yet
 
+        self.after(3000, self.output_poll_response_queue)
 
     def start_transcription(self):
         self.transcription_running = True
-        def run_transcription():
-            def main():
-                print("Running transcription")
-                parser = argparse.ArgumentParser()
-                parser.add_argument("--model", default="tiny", help="Model to use", choices=["tiny"])
-                parser.add_argument("--energy_threshold", default=1000, type=int)
-                parser.add_argument("--record_timeout", default=2, type=float)
-                parser.add_argument("--phrase_timeout", default=3, type=float)
-                args = parser.parse_args()
+        self.transcription_accumulated = ''  # Variable to store accumulated transcription
+        
+        # Start the transcription thread
+        self.transcribing_thread = threading.Thread(target=self.run_transcription, daemon=True)
+        self.transcribing_thread.start()
 
-                phrase_time = None
-                data_queue = queue.Queue()
-                recorder = sr.Recognizer()
-                recorder.energy_threshold = args.energy_threshold
-                recorder.dynamic_energy_threshold = False
+    def run_transcription(self):
+        def main():
+            print("Running transcription")
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--model", default="tiny", help="Model to use", choices=["tiny"])
+            parser.add_argument("--energy_threshold", default=1000, type=int)
+            parser.add_argument("--record_timeout", default=2, type=float)
+            parser.add_argument("--phrase_timeout", default=3, type=float)
+            args = parser.parse_args()
 
-                source = sr.Microphone(sample_rate=16000)
+            phrase_time = None
+            data_queue = queue.Queue()
+            recorder = sr.Recognizer()
+            recorder.energy_threshold = args.energy_threshold
+            recorder.dynamic_energy_threshold = False
 
-                try:
-                    model = whisper.load_model("tiny")
-                except Exception as e:
-                    print(f"Error loading model: {e}")
-                    return
+            source = sr.Microphone(sample_rate=16000)
 
-                record_timeout = args.record_timeout
-                phrase_timeout = args.phrase_timeout
-                transcription = ['']
+            try:
+                model = whisper.load_model("tiny")
+            except Exception as e:
+                print(f"Error loading model: {e}")
+                return
 
-                with source:
-                    recorder.adjust_for_ambient_noise(source)
+            record_timeout = args.record_timeout
+            phrase_timeout = args.phrase_timeout
+            transcription = ['']
 
-                def record_callback(_, audio: sr.AudioData) -> None:
-                    data = audio.get_raw_data()
-                    data_queue.put(data)
+            with source:
+                recorder.adjust_for_ambient_noise(source)
 
-                recorder.listen_in_background(source, record_callback, phrase_time_limit=record_timeout)
+            def record_callback(_, audio: sr.AudioData) -> None:
+                data = audio.get_raw_data()
+                data_queue.put(data)
 
+            recorder.listen_in_background(source, record_callback, phrase_time_limit=record_timeout)
+
+            # Clear transcription every 30 seconds
+            def clear_and_send_transcription():
                 while self.transcription_running:
-                    try:
-                        now = datetime.utcnow()
-                        if not data_queue.empty():
-                            phrase_complete = False
-                            if phrase_time and now - phrase_time > timedelta(seconds=phrase_timeout):
-                                phrase_complete = True
-                            phrase_time = now
+                    print("30-second interval reached, sending transcription segment...")
 
-                            audio_data = b''.join(data_queue.queue)
-                            data_queue.queue.clear()
+                    if self.transcription_accumulated.strip():
+                        print("Sending transcription segment to API")
+                        self.respond(self.transcription_accumulated)  # Send to OpenAI API
 
-                            audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-                            result = model.transcribe(audio_np, fp16=torch.cuda.is_available())
-                            text = result['text'].strip()
+                        # Clear accumulated transcription and input box (UI)
+                        self.transcription_accumulated = ''
+                        self.input_box.config(state=NORMAL)
+                        self.input_box.delete(1.0, END)
+                        self.input_box.config(state=DISABLED)
 
-                            if phrase_complete:
-                                transcription.append(text)
-                            else:
-                                transcription[-1] = text
+                    # Wait for the next 30-second interval
+                    sleep(30)
 
-                            # Send the transcription to the main thread via the queue
+            # Start a thread for sending accumulated transcription every 30 seconds
+            threading.Thread(target=clear_and_send_transcription, daemon=True).start()
+
+            # Continuously transcribe and accumulate text
+            while self.transcription_running:
+                try:
+                    now = datetime.utcnow()
+                    if not data_queue.empty():
+                        print("Processing audio data...")
+                        audio_data = b''.join(data_queue.queue)
+                        data_queue.queue.clear()
+
+                        audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                        result = model.transcribe(audio_np, fp16=torch.cuda.is_available())
+                        text = result['text'].strip()
+
+                        if text:
+                            print(f"Transcribed text: {text}")
+                            transcription[-1] = text
+                            self.transcription_accumulated += text + " "  # Accumulate transcription
+
+                            # Update UI with the latest transcription
                             self.transcription_queue.put("\n".join(transcription))
 
-                        sleep(0.25)
-                    except KeyboardInterrupt:
-                        break
+                        sleep(0.25)  # Allow other threads to run
+                except KeyboardInterrupt:
+                    break
 
-            main()
+        # Start the main transcription logic in a thread
+        threading.Thread(target=main, daemon=True).start()
 
-        # Start the transcription thread
-        self.transcripting_thread = threading.Thread(target=run_transcription)
-        self.transcripting_thread.start()
+    def respond(self, transcription_segment):
+        def api_response(transcription_segment):
+            try:
+                print(f"Sending transcription to API: {transcription_segment}")
+                client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+                completion = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are speaking to somebody on the phone that is discussing computer issues, and are purposely being unhelpful to them because they are a scammer."},
+                        {"role": "user", "content": transcription_segment}
+                    ]
+                )
+
+                response = completion.choices[0].message.content  # Use .content instead of subscripting
+                print(f"Received API response: {response}")
+                self.output_queue.put(response)  # Put the response in the queue to update the output box
+
+            except Exception as e:
+                print(f"Error with API request: {e}")
+
+        # Start the API response thread for each transcription segment
+        self.output_thread = threading.Thread(target=api_response, args=(transcription_segment,), daemon=True)
+        self.output_thread.start()
+
 
     def stop_transcription(self):
-        self.transcription_running = False
-        print("Transcription stopping.")
-        if self.transcripting_thread is not None:
-            self.transcripting_thread.join(timeout=1)
+        if self.transcription_running:
+            print("Stopping transcription...")
+            self.transcription_running = False  # Stop the transcription loop
+
+            # Wait for the transcription thread to finish if it's still running
+            if self.transcribing_thread and self.transcribing_thread.is_alive():
+                self.transcribing_thread.join()
+                print("Transcription thread stopped.")
 
 
 class Run_Label(Label):
@@ -175,6 +249,11 @@ class Run_Label(Label):
             self.is_on = True
             self.app_instance.start_transcription()
 
+            # Make sure to call respond only if there's accumulated transcription
+            if self.app_instance.transcription_accumulated.strip():
+                self.app_instance.respond(self.app_instance.transcription_accumulated)
+
+
 
 class Text_Display(Label, LabelFrame):
     def __init__(self, parent):
@@ -184,7 +263,7 @@ class Text_Display(Label, LabelFrame):
         # Changed from Label to Text widget
         self.input_box = Text(parent, font=('Arial Bold', 9), width=36, height=17, wrap=WORD, borderwidth=2, state=DISABLED)
         self.output_label = Label(parent, text='OUTPUT', font=('Arial Bold', 11))
-        self.output_box = Label(parent, text="Waiting for activation...", font=('Arial Bold', 9), anchor=NW, width=36, height=17, bd=2)
+        self.output_box = Text(parent, font=('Arial Bold', 9), width=36, height=17, wrap=WORD, borderwidth=2, state=DISABLED)
 
         self.input_label.place(relx=0.225, rely=0.21)
         self.output_label.place(relx=0.685, rely=0.21)
@@ -199,6 +278,19 @@ class Text_Display(Label, LabelFrame):
 
             # Scroll to the end of the text widget
             self.input_box.see(END)  # Automatically scroll to the latest entry
+
+    def update_output_text(self, response):
+        if response.strip():
+            print("State NORMAL-ified!")
+            self.output_box.config(state=NORMAL)
+            print("Inserting jargon")
+            self.output_box.insert(END, response + "\n")
+            print("State DISABLED-ified!")
+            self.output_box.config(state=DISABLED)
+
+            # Scroll to bottom automatically
+            print("Scrolling!")
+            self.output_box.see(END)
 
 # Initialize and run the app
 app1 = App('Scam-Bait')
