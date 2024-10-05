@@ -32,7 +32,9 @@ class App(Tk):
 
         # INPUT BOX WIDGETS
         self.input_box = self.t_display.input_box
-        self.change_input_id = None
+
+        # OUTPUT BOX WIDGETS
+        self.output_box = self.t_display.output_box
 
         # Queue for communication between the transcription thread and the main thread
         self.transcription_queue = queue.Queue()
@@ -138,21 +140,27 @@ class App(Tk):
 
             # Clear transcription every 30 seconds
             def clear_and_send_transcription():
-                while self.transcription_running:
-                    print("30-second interval reached, sending transcription segment...")
-
-                    if self.transcription_accumulated.strip():
-                        print("Sending transcription segment to API")
+                """
+                Function will 
+                """
+                while self.transcription_running:  # While the transcription is on
+                    if self.transcription_accumulated.strip():  # If the transcription accumulated is not just whitespace
+                        print("30-second interval reached, sending transcription segment to API model")
                         self.respond(self.transcription_accumulated)  # Send to OpenAI API
+                        
+                        # Write accumulated transcription to a text file after each segment
+                        try:
+                            with open('Transcription Record.txt', 'a', encoding='utf-8') as file:  # Specify UTF-8 encoding
+                                file.write(self.transcription_accumulated + '\n')  # Add a newline for separation
+                        except Exception as e:
+                            print(f"Error writing to file: {e}")
 
-                        # Clear accumulated transcription and input box (UI)
+                        # Reset accumulated transcription after it's processed
                         self.transcription_accumulated = ''
-                        self.input_box.config(state=NORMAL)
-                        self.input_box.delete(1.0, END)
-                        self.input_box.config(state=DISABLED)
 
                     # Wait for the next 30-second interval
                     sleep(30)
+
 
             # Start a thread for sending accumulated transcription every 30 seconds
             threading.Thread(target=clear_and_send_transcription, daemon=True).start()
@@ -201,14 +209,14 @@ class App(Tk):
 
                 response = completion.choices[0].message.content  # Use .content instead of subscripting
                 print(f"Received API response: {response}")
-                self.output_queue.put(response)  # Put the response in the queue to update the output box
+                self.output_queue.put(response+"\n")  # Put the response in the queue to update the output box
 
             except Exception as e:
                 print(f"Error with API request: {e}")
 
-        # Start the API response thread for each transcription segment
-        self.output_thread = threading.Thread(target=api_response, args=(transcription_segment,), daemon=True)
-        self.output_thread.start()
+        # Create the thread that will hold the API's response following segmented transcription given to it
+        self.output_thread = threading.Thread(target=api_response, args=(transcription_segment,), daemon=True) # 'daemon' is used so when the main thread is terminated all subsequent threads are also terminated making the process more failsafe
+        self.output_thread.start() # Start the API response thread for each transcription segment
 
 
     def stop_transcription(self):
@@ -225,33 +233,47 @@ class App(Tk):
 class Run_Label(Label):
     def __init__(self, parent, app_instance):
         super().__init__(parent)
-        self.app_instance = app_instance
-        self.is_on = False
-        self.starter = PhotoImage(file="GUI elements/button/starter.png")
-        self.on = PhotoImage(file="c:/Users/SUT0001/Desktop/AC 34 SAT/GUI elements/button/green.png")
-        self.off = PhotoImage(file="c:/Users/SUT0001/Desktop/AC 34 SAT/GUI elements/button/red.png")
 
+        # Creating a usable instance of the 'App' class so it's methods and variables can be accessed here.
+        self.app_instance = app_instance
+
+        self.is_on = False # Used to determine whether the program is on or off
+
+        # Interchangable button colours
+        self.starter = PhotoImage(file="GUI elements/button/starter.png") # Grey button when program is initialized
+        self.on = PhotoImage(file="c:/Users/SUT0001/Desktop/AC 34 SAT/GUI elements/button/green.png") # Green button when program is running
+        self.off = PhotoImage(file="c:/Users/SUT0001/Desktop/AC 34 SAT/GUI elements/button/red.png") # Red button when program is stopped
+
+        # Text displaying the running status of the program
         self.running_label = Label(parent, text='CLICK TO RUN.', borderwidth=2, relief=SUNKEN, width=29, height=2, font=('Arial', 19))
-        self.running_label.place(relx=0.95, rely=0.1, anchor=E)
-        self.on_button = Button(parent, image=self.starter, bd=0, command=self.Switch, borderwidth=0)
-        self.on_button.place(relx=0.05, rely=0.03)
+        self.running_label.place(relx=0.95, rely=0.1, anchor=E) # Positioning the running_label
+
+        # Button represented with interchangable image variables
+        # 'self.starter' is used when creating the button but is configured to either green or red when the Switch function is activated
+        self.on_button = Button(parent, image=self.starter, bd=0, command=self.Switch, borderwidth=0) 
+        self.on_button.place(relx=0.05, rely=0.03) # Positioning the button
 
     def Switch(self):
+        """
+        Utilises the button icon to switch the program on and off,
+        through the self.is_on variable.
+        """
         print("Button clicked.")
-        if self.is_on:
-            self.on_button.config(image=self.off)
+        if self.is_on: # If it was on, turn it off
+            self.on_button.config(image=self.off) # Change image to show red button
             self.running_label.config(text="STOPPED. CLICK AGAIN TO RUN.")
-            self.is_on = False
+            self.is_on = False # It is now off
             self.app_instance.stop_transcription()
-        else:
-            self.on_button.config(image=self.on)
+        else: # If it was off, turn it on
+            self.on_button.config(image=self.on) # Change image to show green button
             self.running_label.config(text="RUNNING. CLICK AGAIN TO STOP.")
-            self.is_on = True
+            self.is_on = True # It is now running
             self.app_instance.start_transcription()
 
             # Make sure to call respond only if there's accumulated transcription
             if self.app_instance.transcription_accumulated.strip():
-                self.app_instance.respond(self.app_instance.transcription_accumulated)
+                self.app_instance.respond(self.app_instance.transcription_accumulated) # Pass in parameter of accumulated transcription to respond function
+                
 
 
 
@@ -259,38 +281,43 @@ class Text_Display(Label, LabelFrame):
     def __init__(self, parent):
         super().__init__(parent)
 
+        # Input section
         self.input_label = Label(parent, text='INPUT', font=('Arial Bold', 11))
-        # Changed from Label to Text widget
         self.input_box = Text(parent, font=('Arial Bold', 9), width=36, height=17, wrap=WORD, borderwidth=2, state=DISABLED)
+
+        # Output section
         self.output_label = Label(parent, text='OUTPUT', font=('Arial Bold', 11))
         self.output_box = Text(parent, font=('Arial Bold', 9), width=36, height=17, wrap=WORD, borderwidth=2, state=DISABLED)
 
+        # Positioning the widgets
         self.input_label.place(relx=0.225, rely=0.21)
         self.output_label.place(relx=0.685, rely=0.21)
         self.input_box.place(relx=0.05, rely=0.29)
         self.output_box.place(relx=0.5225, rely=0.29)
 
     def update_input_text(self, transcription_text):
+        """
+        'transcription_text' passed in as a parameter of the text that has been transcribed
+        This function mainly gets rid of any whitespace text generated,
+        and makes sure the user cannot edit the text window while it is running.
+        """
         if transcription_text.strip():  # Check if the text is not just whitespace
             self.input_box.config(state=NORMAL)  # Enable editing to insert text
             self.input_box.insert(END, transcription_text + "\n")  # Add a new line for each new entry
             self.input_box.config(state=DISABLED)  # Disable editing again
 
-            # Scroll to the end of the text widget
             self.input_box.see(END)  # Automatically scroll to the latest entry
 
     def update_output_text(self, response):
-        if response.strip():
-            print("State NORMAL-ified!")
-            self.output_box.config(state=NORMAL)
-            print("Inserting jargon")
-            self.output_box.insert(END, response + "\n")
-            print("State DISABLED-ified!")
-            self.output_box.config(state=DISABLED)
+        """
+        Replica of above method instead using response parameter.
+        """
+        if response.strip():  # Check if the text is not just whitespace
+            self.output_box.config(state=NORMAL)  # Enable editing to insert text
+            self.output_box.insert(END, response + "\n")  # Add a new line for each new entry
+            self.output_box.config(state=DISABLED)  # Disable editing again
 
-            # Scroll to bottom automatically
-            print("Scrolling!")
-            self.output_box.see(END)
+            self.output_box.see(END)  # Automatically scroll to the latest entry
 
 # Initialize and run the app
 app1 = App('Scam-Bait')
